@@ -9,10 +9,12 @@ import {
 	Wallet,
 	type WalletData,
 	type Webhook,
+	readContract,
 } from "@coinbase/coinbase-sdk";
 import type { EthereumTransaction } from "@coinbase/coinbase-sdk/dist/client";
 import { type IAgentRuntime, elizaLogger, settings } from "@elizaos/core";
 import { createArrayCsvWriter } from "csv-writer";
+import { ABI } from "./constants";
 import type { Transaction } from "./types";
 
 const tradeCsvFilePath = path.join("/tmp", "trades.csv");
@@ -599,4 +601,83 @@ export function getCharityAddress(
 	}
 
 	return charityAddress;
+}
+
+// Helper function to serialize BigInt values
+// biome-ignore lint/suspicious/noExplicitAny: Needed for generic serialization
+const serializeBigInt = (value: any): any => {
+	if (typeof value === "bigint") {
+		return value.toString();
+	}
+	if (Array.isArray(value)) {
+		return value.map(serializeBigInt);
+	}
+	if (typeof value === "object" && value !== null) {
+		return Object.fromEntries(
+			Object.entries(value).map(([k, v]) => [k, serializeBigInt(v)]),
+		);
+	}
+	return value;
+};
+
+/**
+ * Wrapper function to read data from a smart contract using the Coinbase SDK
+ * @param params Parameters for contract reading as a single object or multiple arguments
+ * @returns The serialized contract response
+ */
+// biome-ignore lint/suspicious/noExplicitAny: Needed for flexibility with different contract methods
+export async function readContractWrapper(
+	runtimeOrParams: IAgentRuntime | any,
+	contractAddress?: `0x${string}`,
+	method?: string,
+	args?: any,
+	networkId?: string,
+	abi?: any,
+): Promise<any> {
+	// Ensure Coinbase SDK is configured
+	let params: any;
+
+	// Handle both object-style and multi-argument calls
+	if (contractAddress && method) {
+		// Multi-argument form (runtime, contractAddress, method, args, networkId, abi)
+		const runtime = runtimeOrParams as IAgentRuntime;
+
+		Coinbase.configure({
+			apiKeyName:
+				runtime.getSetting("COINBASE_API_KEY") ?? process.env.COINBASE_API_KEY,
+			privateKey:
+				runtime.getSetting("COINBASE_PRIVATE_KEY") ??
+				process.env.COINBASE_PRIVATE_KEY,
+		});
+
+		params = {
+			contractAddress,
+			method,
+			args,
+			networkId,
+			abi: abi || ABI,
+		};
+	} else {
+		// Object form (all params in a single object)
+		params = runtimeOrParams;
+
+		Coinbase.configure({
+			apiKeyName: process.env.COINBASE_API_KEY,
+			privateKey: process.env.COINBASE_PRIVATE_KEY,
+		});
+
+		params.abi = params.abi || ABI;
+	}
+
+	try {
+		elizaLogger.debug("Reading contract with params:", params);
+		const result = await readContract(params);
+		// Serialize BigInt values in the result for JSON compatibility
+		const serializedResult = serializeBigInt(result);
+		elizaLogger.debug("Contract read result (serialized):", serializedResult);
+		return serializedResult;
+	} catch (error) {
+		elizaLogger.error("Error reading contract:", error);
+		throw error;
+	}
 }
